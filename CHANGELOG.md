@@ -1,5 +1,27 @@
 # Changelog
 
+## [6.8.0](https://github.com/morluto/rea/compare/rea-agents-6.7.0...rea-agents-6.8.0) (2026-10-18)
+
+
+### Bug Fixes
+
+* **adb:** preserve command failure target identities ([8307ea3](https://github.com/morluto/rea/commit/8307ea3717b9bbc6b5cf83d96a0f73d47708e586)), closes [#4641](https://github.com/morluto/rea/issues/4641) [#4643](https://github.com/morluto/rea/issues/4643) [#5051](https://github.com/morluto/rea/issues/5051)
+* **hopper:** verify and repair the Linux embedding runtime ([#5041](https://github.com/morluto/rea/issues/5041)) ([b0b485a](https://github.com/morluto/rea/commit/b0b485abff802b79d238dd24a9fa4abd0713d3ee))
+* **native:** retain signature roots until descriptor cleanup completes ([9e259f8](https://github.com/morluto/rea/commit/9e259f87c8be3d22a0b96f12ed7838830869c987)), closes [#5052](https://github.com/morluto/rea/issues/5052)
+* **plist:** ignore processing instructions between container members ([fd728f2](https://github.com/morluto/rea/commit/fd728f271e7de7bcfa63890b573715720d5f948c)), closes [#4964](https://github.com/morluto/rea/issues/4964)
+* **tests:** preserve temporary fixture ownership ([093ce69](https://github.com/morluto/rea/commit/093ce695f0a7c3407c7fde520ed8b20c0981b408))
+* **tests:** restore Android prerequisite verification ([23f984b](https://github.com/morluto/rea/commit/23f984b1a884baefc3c44e4ab697f6eff61dffb6))
+
+
+### Performance Improvements
+
+* **hopper:** reuse decoded records for literal string matches ([#5017](https://github.com/morluto/rea/issues/5017)) ([63c9708](https://github.com/morluto/rea/commit/63c970812b8b5c6664400c9360e22c427844820c))
+
+
+### Documentation
+
+* **jeb:** qualify Linux CE native workflows ([#5002](https://github.com/morluto/rea/issues/5002)) ([c12d9ed](https://github.com/morluto/rea/commit/c12d9eda87aa5a022ee7e18ea96d8d03bfd12e96)), closes [#4996](https://github.com/morluto/rea/issues/4996)
+
 ## [6.7.0](https://github.com/morluto/rea/compare/rea-agents-6.6.0...rea-agents-6.7.0) (2026-10-18)
 
 ### Highlights
