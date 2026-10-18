@@ -84,6 +84,13 @@ export const WEB_SCRIPT_EXPORT_PROVIDER = {
   version: "1",
 } as const;
 
+/** Provider identity for caller-directed artifact byte mutation. */
+export const ARTIFACT_PATCH_PROVIDER = {
+  id: "rea-artifact-patch",
+  name: "REA artifact mutation workflow",
+  version: "1",
+} as const;
+
 /** Provider identity for deterministic static JavaScript application analysis. */
 export const JAVASCRIPT_APPLICATION_PROVIDER = {
   id: "rea-javascript-application",

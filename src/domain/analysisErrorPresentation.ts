@@ -217,6 +217,20 @@ const artifactErrorCategory = (
   if (reason === "limit") return "truncated";
   if (reason === "cancelled") return "cancelled";
   if (reason === "unavailable") return "unavailable";
+  if (
+    reason === "invalid_input" ||
+    reason === "expected_bytes_mismatch" ||
+    reason === "match_unresolved" ||
+    reason === "overlap" ||
+    reason === "authority_required" ||
+    reason === "verification_failed" ||
+    reason === "container_unsupported"
+  )
+    return reason === "container_unsupported"
+      ? "unsupported_target"
+      : reason === "authority_required" || reason === "invalid_input"
+        ? "invalid_input"
+        : "integrity_mismatch";
   return "execution_failure";
 };
 
@@ -433,6 +447,19 @@ const artifactMessage = ({
     return (
       detail ??
       "Artifact contains a conflicting internal path. Inspect the reported path before retrying."
+    );
+  if (
+    reason === "invalid_input" ||
+    reason === "expected_bytes_mismatch" ||
+    reason === "match_unresolved" ||
+    reason === "overlap" ||
+    reason === "container_unsupported" ||
+    reason === "authority_required" ||
+    reason === "verification_failed"
+  )
+    return (
+      detail ??
+      "The artifact mutation was refused. Re-plan against the current artifact bytes and review the reported rule."
     );
   if (reason === "unavailable" && details?.unpacked === true)
     return `ASAR unpacked companion bytes are unavailable for ${details.logicalPath}. Select the archive in place with its .unpacked directory beside it, then retry.`;

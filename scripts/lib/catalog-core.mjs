@@ -104,6 +104,7 @@ const SOURCE_PATHS = {
   webScriptContracts: "dist/contracts/webScriptToolContracts.js",
   javascriptRecoveryContracts:
     "dist/contracts/javascript/javascriptRecoveryToolContracts.js",
+  artifactPatchContracts: "dist/contracts/artifactPatchToolContracts.js",
   javascriptRecoveryProvider: "dist/javascript/recovery/WakaruRelease.js",
   supportedClients: "dist/application/SupportedClients.js",
   hopperProvider: "dist/hopper/HopperProviderCapabilities.js",

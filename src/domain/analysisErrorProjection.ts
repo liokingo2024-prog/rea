@@ -169,6 +169,19 @@ const artifactOperationCode = (
     return "artifact_integrity_mismatch";
   if (error.reason === "limit") return "truncated";
   if (error.reason === "cancelled") return "cancelled";
+  if (error.reason === "container_unsupported") return "unsupported_target";
+  if (
+    error.reason === "invalid_input" ||
+    error.reason === "match_unresolved" ||
+    error.reason === "overlap" ||
+    error.reason === "authority_required"
+  )
+    return "invalid_request";
+  if (
+    error.reason === "expected_bytes_mismatch" ||
+    error.reason === "verification_failed"
+  )
+    return "artifact_integrity_mismatch";
   return "artifact_operation_failed";
 };
 

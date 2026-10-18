@@ -120,6 +120,7 @@ export const toolFamilyCatalog = (sources) => {
         ...sources.webScriptContracts.WEB_SCRIPT_TOOL_CONTRACTS,
         ...sources.javascriptRecoveryContracts
           .JAVASCRIPT_RECOVERY_TOOL_CONTRACTS,
+        ...sources.artifactPatchContracts.ARTIFACT_PATCH_TOOL_CONTRACTS,
       ],
     },
     {

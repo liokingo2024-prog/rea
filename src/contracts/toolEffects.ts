@@ -712,6 +712,17 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
   record_unknown: effects({ mutatesSession: true, idempotent: false }),
   update_unknown: effects({ mutatesSession: true, idempotent: false }),
   verify_unknown_resolution: effects(),
+  // Planning and verification read one artifact and record Evidence; only the
+  // apply workflow can change artifact bytes on disk.
+  plan_artifact_patch: effects({ mutatesSession: true }),
+  apply_artifact_patch: effects({
+    mutatesTarget: true,
+    mutatesSession: true,
+    writesFilesystem: true,
+    mayDiscardData: true,
+    idempotent: false,
+  }),
+  verify_artifact_patch: effects({ mutatesSession: true }),
 };
 
 /** Derive MCP annotations without tool-name or tool-family heuristics. */

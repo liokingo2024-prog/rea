@@ -20,7 +20,10 @@ export class ArtifactOperationError extends AnalysisError {
       | "export_web_scripts"
       | "trace_web_module_imports"
       | "trace_web_source_location"
-      | "analyze_javascript_application",
+      | "analyze_javascript_application"
+      | "plan_artifact_patch"
+      | "apply_artifact_patch"
+      | "verify_artifact_patch",
     readonly reason:
       | "cancelled"
       | "format"
@@ -28,7 +31,21 @@ export class ArtifactOperationError extends AnalysisError {
       | "limit"
       | "path"
       | "unavailable"
-      | "io",
+      | "io"
+      /** A caller-directed mutation request was internally inconsistent. */
+      | "invalid_input"
+      /** Bytes to replace are not the bytes the caller described. */
+      | "expected_bytes_mismatch"
+      /** A byte pattern matched zero times or ambiguously. */
+      | "match_unresolved"
+      /** Two planned replacements cover the same bytes. */
+      | "overlap"
+      /** Container framing cannot represent the requested change. */
+      | "container_unsupported"
+      /** In-place mutation lacked its explicit authority preconditions. */
+      | "authority_required"
+      /** A written artifact did not verify against its plan. */
+      | "verification_failed",
     readonly artifactDetails?: Readonly<{
       logicalPath: string;
       declaredSha256: string | null;
