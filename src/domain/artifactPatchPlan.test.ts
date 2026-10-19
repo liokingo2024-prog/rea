@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { crc32 } from "node:zlib";
+import { crc32, deflateRawSync } from "node:zlib";
 
 import { describe, expect, it } from "vitest";
 
@@ -33,6 +33,14 @@ interface ZipEntry {
   readonly data: Buffer;
   /** Overrides the declared method; the stored payload is unchanged. */
   readonly method?: number;
+  /** Raw general purpose flags; descriptor adds 0x0008 on top. */
+  readonly flags?: number;
+  /** Declared uncompressed size; defaults to the payload length. */
+  readonly uncompressedBytes?: number;
+  /** Declared CRC-32; defaults to the CRC-32 of the payload. */
+  readonly crc32?: number;
+  /** Record CRC-32 and sizes after the payload instead of in the local header. */
+  readonly descriptor?: boolean;
 }
 
 /** Minimal store-only ZIP writer for exact-offset container tests. */
@@ -42,29 +50,51 @@ const zipArchive = (entries: readonly ZipEntry[]): Buffer => {
   let localOffset = 0;
   for (const entry of entries) {
     const name = Buffer.from(entry.name, "utf8");
+    const method = entry.method ?? 0;
+    const declaredCrc = entry.crc32 ?? crc32(entry.data);
+    const declaredUncompressed = entry.uncompressedBytes ?? entry.data.length;
+    const flags = (entry.flags ?? 0) | (entry.descriptor === true ? 0x0008 : 0);
     const local = Buffer.alloc(30);
     local.writeUInt32LE(0x04034b50, 0);
     local.writeUInt16LE(20, 4);
-    local.writeUInt16LE(0, 6);
-    local.writeUInt16LE(entry.method ?? 0, 8);
-    local.writeUInt32LE(crc32(entry.data), 14);
-    local.writeUInt32LE(entry.data.length, 18);
-    local.writeUInt32LE(entry.data.length, 22);
+    local.writeUInt16LE(flags, 6);
+    local.writeUInt16LE(method, 8);
+    if (entry.descriptor !== true) {
+      local.writeUInt32LE(declaredCrc, 14);
+      local.writeUInt32LE(entry.data.length, 18);
+      local.writeUInt32LE(declaredUncompressed, 22);
+    }
     local.writeUInt16LE(name.length, 26);
-    locals.push(local, name, entry.data);
+    const descriptor = Buffer.alloc(16);
+    if (entry.descriptor === true) {
+      descriptor.writeUInt32LE(0x08074b50, 0);
+      descriptor.writeUInt32LE(declaredCrc, 4);
+      descriptor.writeUInt32LE(entry.data.length, 8);
+      descriptor.writeUInt32LE(declaredUncompressed, 12);
+    }
+    locals.push(
+      local,
+      name,
+      entry.data,
+      ...(entry.descriptor === true ? [descriptor] : []),
+    );
     const central = Buffer.alloc(46);
     central.writeUInt32LE(0x02014b50, 0);
     central.writeUInt16LE(20, 4);
     central.writeUInt16LE(20, 6);
-    central.writeUInt16LE(0, 8);
-    central.writeUInt16LE(entry.method ?? 0, 10);
-    central.writeUInt32LE(crc32(entry.data), 16);
+    central.writeUInt16LE(flags, 8);
+    central.writeUInt16LE(method, 10);
+    central.writeUInt32LE(declaredCrc, 16);
     central.writeUInt32LE(entry.data.length, 20);
-    central.writeUInt32LE(entry.data.length, 24);
+    central.writeUInt32LE(declaredUncompressed, 24);
     central.writeUInt16LE(name.length, 28);
     central.writeUInt32LE(localOffset, 42);
     centrals.push(central, name);
-    localOffset += 30 + name.length + entry.data.length;
+    localOffset +=
+      30 +
+      name.length +
+      entry.data.length +
+      (entry.descriptor === true ? descriptor.length : 0);
   }
   const centralBytes = Buffer.concat(centrals);
   const end = Buffer.alloc(22);
@@ -269,6 +299,98 @@ describe("planArtifactPatch over ZIP containers", () => {
     expect(inFraming.ok).toBe(false);
     if (inFraming.ok) return;
     expect(inFraming.error.reason).toBe("container_unsupported");
+  });
+});
+
+describe("verifyContainerIntegrity over ZIP containers", () => {
+  const containerOf = (bytes: Buffer): ArtifactContainer => {
+    const container = classifyArtifactContainer(bytes);
+    if (!container.ok) throw new Error(container.error.detail);
+    return container.value;
+  };
+
+  it("verifies stored members and deflate members from their own bytes", () => {
+    const text = Buffer.from("FLAG=0\nnotes\n");
+    const bytes = zipArchive([
+      { name: "assets/config.txt", data: text },
+      {
+        name: "assets/app.js",
+        data: deflateRawSync(text),
+        method: 8,
+        uncompressedBytes: text.length,
+        crc32: crc32(text),
+      },
+    ]);
+    const integrity = verifyContainerIntegrity(bytes, containerOf(bytes));
+    expect(integrity.state).toBe("verified");
+    expect(integrity.entriesChecked).toBe(2);
+    expect(integrity.detail).toBeNull();
+  });
+
+  it("verifies members whose local header holds a data descriptor", () => {
+    const text = Buffer.from("classes payload");
+    const bytes = zipArchive([
+      {
+        name: "classes.dex",
+        data: deflateRawSync(text),
+        method: 8,
+        uncompressedBytes: text.length,
+        crc32: crc32(text),
+        descriptor: true,
+      },
+    ]);
+    const integrity = verifyContainerIntegrity(bytes, containerOf(bytes));
+    expect(integrity.state).toBe("verified");
+    expect(integrity.entriesChecked).toBe(1);
+  });
+
+  it("reports the entry whose stored bytes stop matching its CRC-32", () => {
+    const bytes = zipArchive([
+      { name: "res/raw/payload.bin", data: Buffer.from("ABCDEFGH") },
+      { name: "res/raw/other.bin", data: Buffer.from("IJKLMNOP") },
+    ]);
+    const tampered = Buffer.from(bytes);
+    tampered[30 + "res/raw/payload.bin".length + 3] = 0x5a;
+    const integrity = verifyContainerIntegrity(tampered, containerOf(bytes));
+    expect(integrity.state).toBe("mismatch");
+    expect(integrity.detail).toContain("res/raw/payload.bin");
+  });
+
+  it("reports a local header that contradicts the central directory", () => {
+    const bytes = zipArchive([{ name: "a.bin", data: Buffer.from("AAAA") }]);
+    const tampered = Buffer.from(bytes);
+    tampered.writeUInt32LE(0x11111111, 14);
+    const integrity = verifyContainerIntegrity(tampered, containerOf(bytes));
+    expect(integrity.state).toBe("mismatch");
+    expect(integrity.detail).toContain("local header");
+  });
+
+  it("reports a member that is not a readable deflate stream", () => {
+    const bytes = zipArchive([
+      { name: "classes.dex", data: Buffer.from("not deflate"), method: 8 },
+    ]);
+    const integrity = verifyContainerIntegrity(bytes, containerOf(bytes));
+    expect(integrity.state).toBe("mismatch");
+    expect(integrity.detail).toContain("deflate stream");
+  });
+
+  it("stays unknown for members it cannot check instead of claiming verification", () => {
+    const encrypted = zipArchive([
+      { name: "assets/config.txt", data: Buffer.from("FLAG=0\n"), flags: 1 },
+    ]);
+    const encryptedIntegrity = verifyContainerIntegrity(
+      encrypted,
+      containerOf(encrypted),
+    );
+    expect(encryptedIntegrity.state).toBe("unknown");
+    expect(encryptedIntegrity.detail).toContain("encrypted");
+
+    const otherMethod = zipArchive([
+      { name: "assets/config.txt", data: Buffer.from("FLAG=0\n"), method: 12 },
+    ]);
+    expect(
+      verifyContainerIntegrity(otherMethod, containerOf(otherMethod)).state,
+    ).toBe("unknown");
   });
 });
 

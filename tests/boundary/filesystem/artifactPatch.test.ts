@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { crc32 } from "node:zlib";
+import { crc32, deflateRawSync } from "node:zlib";
 
 import { describe, expect, it } from "vitest";
 
@@ -92,6 +92,70 @@ const zipArchive = (name: string, data: Buffer): Buffer => {
   end.writeUInt32LE(30 + nameBytes.length + data.length, 16);
   return Buffer.concat([local, nameBytes, data, centralBytes, end]);
 };
+
+/**
+ * Two-member ZIP with real framing: one stored member to patch, plus one
+ * deflated member so container verification has to inflate a sibling entry.
+ */
+const mixedZipArchive = (
+  stored: { readonly name: string; readonly data: Buffer },
+  deflated: { readonly name: string; readonly text: Buffer },
+): Buffer => {
+  const members: Buffer[] = [];
+  const centrals: Buffer[] = [];
+  let offset = 0;
+  const addMember = (
+    name: Buffer,
+    payload: Buffer,
+    method: number,
+    uncompressedBytes: number,
+    recordedCrc: number,
+  ): void => {
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(method, 8);
+    local.writeUInt32LE(recordedCrc, 14);
+    local.writeUInt32LE(payload.length, 18);
+    local.writeUInt32LE(uncompressedBytes, 22);
+    local.writeUInt16LE(name.length, 26);
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(method, 10);
+    central.writeUInt32LE(recordedCrc, 16);
+    central.writeUInt32LE(payload.length, 20);
+    central.writeUInt32LE(uncompressedBytes, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt32LE(offset, 42);
+    members.push(local, name, payload);
+    centrals.push(central, name);
+    offset += 30 + name.length + payload.length;
+  };
+  const storedName = Buffer.from(stored.name, "utf8");
+  addMember(storedName, stored.data, 0, stored.data.length, crc32(stored.data));
+  const deflatedName = Buffer.from(deflated.name, "utf8");
+  addMember(
+    deflatedName,
+    deflateRawSync(deflated.text),
+    8,
+    deflated.text.length,
+    crc32(deflated.text),
+  );
+  const centralBytes = Buffer.concat(centrals);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(2, 8);
+  end.writeUInt16LE(2, 10);
+  end.writeUInt32LE(centralBytes.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...members, centralBytes, end]);
+};
+
+/** Byte offset of the second member's data in a `mixedZipArchive`. */
+const mixedDeflatedDataOffset = (storedName: string, storedBytes: number) =>
+  30 + storedName.length + storedBytes + 30 + "classes.dex".length;
 
 describe("artifact patch planning and copies", () => {
   it("plans and writes one verified copy without touching the target", async () => {
@@ -366,6 +430,81 @@ describe("artifact patch containers", () => {
         limitations: [],
       });
       expect(await readFile(target, "utf8")).toContain("FLAG=0");
+    });
+  });
+
+  it("verifies a patched container whose compressed sibling must be inflated", async () => {
+    const directory = await createTestTempDirectory("rea-artifact-patch-");
+    const target = join(directory, "app.apk");
+    const output = join(directory, "app.patched.apk");
+    const storedName = "assets/config.txt";
+    const storedData = Buffer.from("FLAG=0\nnotes\n");
+    const dataOffset = 30 + storedName.length;
+    await writeFile(
+      target,
+      mixedZipArchive(
+        { name: storedName, data: storedData },
+        { name: "classes.dex", text: Buffer.from("dex payload that inflates") },
+      ),
+    );
+    await withArtifactResourceScope(async (resources) => {
+      const applied = await applyArtifactPatch(
+        {
+          target_path: target,
+          output_path: output,
+          operations: [replaceOffset(dataOffset + 5, "30", "31")],
+        },
+        resources,
+      );
+      expect(applied.ok).toBe(true);
+      if (!applied.ok) return;
+
+      const verified = await verifyArtifactPatch(
+        {
+          target_path: output,
+          regions: [{ file_offset: dataOffset + 5, expected_hex: "31" }],
+        },
+        resources,
+      );
+      expect(verified.ok).toBe(true);
+      if (!verified.ok) return;
+      const verification = normalized<VerifyResult>(verified.value);
+      expect(verification.container).toEqual({
+        kind: "zip",
+        integrity: "verified",
+        entries_checked: 2,
+        limitations: [],
+      });
+    });
+  });
+
+  it("reports a mismatch when a compressed member stops matching its CRC-32", async () => {
+    const directory = await createTestTempDirectory("rea-artifact-patch-");
+    const target = join(directory, "app.apk");
+    const storedName = "assets/config.txt";
+    const storedData = Buffer.from("FLAG=0\nnotes\n");
+    const bytes = mixedZipArchive(
+      { name: storedName, data: storedData },
+      { name: "classes.dex", text: Buffer.from("dex payload that inflates") },
+    );
+    const corruptionOffset = mixedDeflatedDataOffset(
+      storedName,
+      storedData.length,
+    );
+    bytes.writeUInt8(
+      bytes.readUInt8(corruptionOffset) ^ 0xff,
+      corruptionOffset,
+    );
+    await writeFile(target, bytes);
+    await withArtifactResourceScope(async (resources) => {
+      const verified = await verifyArtifactPatch(
+        { target_path: target, regions: [] },
+        resources,
+      );
+      expect(verified.ok).toBe(true);
+      if (!verified.ok) return;
+      const verification = normalized<VerifyResult>(verified.value);
+      expect(verification.container.integrity).toBe("mismatch");
     });
   });
 });

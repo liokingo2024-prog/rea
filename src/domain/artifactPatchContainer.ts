@@ -1,4 +1,4 @@
-import { crc32 } from "node:zlib";
+import { crc32, inflateRawSync } from "node:zlib";
 
 import { ARTIFACT_PATCH_LIMITS } from "./artifactPatch.js";
 import {
@@ -62,6 +62,7 @@ const ZIP_END_OF_CENTRAL_DIRECTORY = 0x06054b50;
 const ZIP_FLAG_ENCRYPTED = 0x0001;
 const ZIP_FLAG_DATA_DESCRIPTOR = 0x0008;
 const ZIP_METHOD_STORED = 0;
+const ZIP_METHOD_DEFLATED = 8;
 
 const findEndOfCentralDirectory = (bytes: Buffer): number | undefined => {
   const earliest = Math.max(0, bytes.length - 22 - 0xffff);
@@ -357,6 +358,7 @@ export const containerFramingLimitations = (
       "Zip member data is replaced with the stored CRC-32 of every changed stored entry updated in its local header and central directory record.",
       "Archive-level signatures and digest manifests are not updated; a patched APK, JAR or IPA is unsigned until it is re-signed.",
       "Only stored (uncompressed) entries are patchable; compressed, encrypted and data-descriptor entries are refused.",
+      `Container integrity is re-derived from the artifact's own bytes: each member's CRC-32 is recomputed over its stored bytes or its inflated deflate stream, within a ${ARTIFACT_PATCH_LIMITS.verificationInflatedBytes} byte inflation budget; members that are encrypted, use another compression method or exceed that budget leave the container unknown instead of verified.`,
     ];
   if (container.kind === "asar")
     return [
@@ -374,7 +376,79 @@ export interface ContainerIntegrity {
   readonly detail: string | null;
 }
 
-/** Re-derive container framing integrity from the artifact's own bytes. */
+/**
+ * Read one member's framing claims straight from the bytes under verification.
+ *
+ * The container only supplies entry topology (name, offsets). Every recorded
+ * CRC-32, size, method and flag is re-read from the artifact being checked, so
+ * a container parsed from earlier bytes cannot lend a stale claim to the
+ * verdict.
+ */
+interface ZipMemberClaims {
+  readonly flags: number;
+  readonly method: number;
+  readonly crc32: number;
+  readonly compressedBytes: number;
+  readonly uncompressedBytes: number;
+  readonly localFlags: number;
+  readonly localMethod: number;
+  readonly localCrc32: number;
+  readonly localCompressedBytes: number;
+  readonly localUncompressedBytes: number;
+}
+
+const readZipMemberClaims = (
+  bytes: Buffer,
+  member: ZipMember,
+): ZipMemberClaims => ({
+  flags: bytes.readUInt16LE(member.centralDirectoryOffset + 8),
+  method: bytes.readUInt16LE(member.centralDirectoryOffset + 10),
+  crc32: bytes.readUInt32LE(member.centralDirectoryOffset + 16),
+  compressedBytes: bytes.readUInt32LE(member.centralDirectoryOffset + 20),
+  uncompressedBytes: bytes.readUInt32LE(member.centralDirectoryOffset + 24),
+  localFlags: bytes.readUInt16LE(member.localHeaderOffset + 6),
+  localMethod: bytes.readUInt16LE(member.localHeaderOffset + 8),
+  localCrc32: bytes.readUInt32LE(member.localHeaderOffset + 14),
+  localCompressedBytes: bytes.readUInt32LE(member.localHeaderOffset + 18),
+  localUncompressedBytes: bytes.readUInt32LE(member.localHeaderOffset + 22),
+});
+
+const zipMemberDisagreement = (
+  member: ZipMember,
+  claims: ZipMemberClaims,
+): string | null => {
+  if (claims.localMethod !== claims.method)
+    return `ZIP entry ${member.path} declares compression method ${claims.method} in the central directory but ${claims.localMethod} in its local header`;
+  // A member with a data descriptor records placeholder CRC-32 and sizes in its
+  // local header, so those fields carry no claim to compare.
+  if ((claims.localFlags & ZIP_FLAG_DATA_DESCRIPTOR) !== 0) return null;
+  if (
+    claims.localCrc32 === claims.crc32 &&
+    claims.localCompressedBytes === claims.compressedBytes &&
+    claims.localUncompressedBytes === claims.uncompressedBytes
+  )
+    return null;
+  return `ZIP entry ${member.path} local header records CRC-32 0x${claims.localCrc32.toString(16)} and ${claims.localCompressedBytes}/${claims.localUncompressedBytes} bytes but its central directory record holds 0x${claims.crc32.toString(16)} and ${claims.compressedBytes}/${claims.uncompressedBytes} bytes`;
+};
+
+const zipMemberMismatch = (
+  detail: string,
+  entriesChecked: number,
+): ContainerIntegrity => ({
+  state: "mismatch",
+  entriesChecked,
+  detail,
+});
+
+/**
+ * Re-derive container framing integrity from the artifact's own bytes.
+ *
+ * Every member is CRC-verified from its own bytes: stored members directly,
+ * deflate members by inflating them within a bounded budget. Members that
+ * cannot be checked this way (encrypted, another compression method, or beyond
+ * the inflation budget) leave the container `unknown` rather than verified, so
+ * a caller never reads a stronger claim than the bytes support.
+ */
 export const verifyContainerIntegrity = (
   bytes: Buffer,
   container: ArtifactContainer,
@@ -396,22 +470,76 @@ export const verifyContainerIntegrity = (
         };
   }
   let checked = 0;
+  let inflatedBytes = 0;
+  const unchecked: string[] = [];
   for (const member of container.members) {
+    const claims = readZipMemberClaims(bytes, member);
+    const disagreement = zipMemberDisagreement(member, claims);
+    if (disagreement !== null) return zipMemberMismatch(disagreement, checked);
+    const dataEnd = member.dataOffset + claims.compressedBytes;
+    if (dataEnd > member.centralDirectoryOffset)
+      return zipMemberMismatch(
+        `ZIP entry ${member.path} records ${claims.compressedBytes} compressed bytes from offset ${member.dataOffset}, into or past the central directory at ${member.centralDirectoryOffset}`,
+        checked,
+      );
+    if ((claims.flags & ZIP_FLAG_ENCRYPTED) !== 0) {
+      unchecked.push(`${member.path} is encrypted`);
+      continue;
+    }
+    const data = bytes.subarray(member.dataOffset, dataEnd);
+    if (claims.method === ZIP_METHOD_STORED) {
+      const computed = crc32(data);
+      if (computed !== claims.crc32)
+        return zipMemberMismatch(
+          `ZIP entry ${member.path} CRC-32 is 0x${computed.toString(16)} over its ${claims.compressedBytes} stored bytes but 0x${claims.crc32.toString(16)} is recorded`,
+          checked + 1,
+        );
+      checked += 1;
+      continue;
+    }
+    if (claims.method !== ZIP_METHOD_DEFLATED) {
+      unchecked.push(`${member.path} uses compression method ${claims.method}`);
+      continue;
+    }
+    if (
+      claims.uncompressedBytes >
+      ARTIFACT_PATCH_LIMITS.verificationInflatedBytes - inflatedBytes
+    ) {
+      unchecked.push(
+        `${member.path} declares ${claims.uncompressedBytes} inflated bytes beyond the ${ARTIFACT_PATCH_LIMITS.verificationInflatedBytes} byte verification budget`,
+      );
+      continue;
+    }
+    let inflated: Buffer;
+    try {
+      inflated = inflateRawSync(data, {
+        maxOutputLength: Math.max(claims.uncompressedBytes, 1),
+      });
+    } catch {
+      return zipMemberMismatch(
+        `ZIP entry ${member.path} is not a readable deflate stream of its declared ${claims.uncompressedBytes} bytes`,
+        checked + 1,
+      );
+    }
+    inflatedBytes += inflated.length;
+    if (inflated.length !== claims.uncompressedBytes)
+      return zipMemberMismatch(
+        `ZIP entry ${member.path} inflates to ${inflated.length} bytes but records ${claims.uncompressedBytes}`,
+        checked + 1,
+      );
+    const computed = crc32(inflated);
+    if (computed !== claims.crc32)
+      return zipMemberMismatch(
+        `ZIP entry ${member.path} CRC-32 is 0x${computed.toString(16)} over its inflated bytes but 0x${claims.crc32.toString(16)} is recorded`,
+        checked + 1,
+      );
     checked += 1;
-    const computed = crc32(
-      bytes.subarray(
-        member.dataOffset,
-        member.dataOffset + member.compressedBytes,
-      ),
-    );
-    const stored = bytes.readUInt32LE(member.centralDirectoryOffset + 16);
-    const local = bytes.readUInt32LE(member.localHeaderOffset + 14);
-    if (computed !== stored || local !== stored)
-      return {
-        state: "mismatch",
-        entriesChecked: checked,
-        detail: `ZIP entry ${member.path} CRC-32 is 0x${computed.toString(16)} over its data but 0x${stored.toString(16)} is recorded`,
-      };
   }
+  if (unchecked.length > 0)
+    return {
+      state: "unknown",
+      entriesChecked: checked,
+      detail: `${unchecked.length} ZIP entries were not CRC-verified: ${unchecked.slice(0, 3).join("; ")}${unchecked.length > 3 ? "; …" : ""}`,
+    };
   return { state: "verified", entriesChecked: checked, detail: null };
 };

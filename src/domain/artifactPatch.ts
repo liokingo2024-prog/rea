@@ -19,6 +19,12 @@ export const ARTIFACT_PATCH_LIMITS = Object.freeze({
   patternBytes: 4096,
   /** Bounded ASAR header admission. */
   asarHeaderBytes: 8 * 1024 * 1024,
+  /**
+   * Total bytes this workflow is willing to inflate to CRC-verify compressed
+   * members. The bound keeps a small archive that expands enormously from
+   * turning verification into unbounded memory use.
+   */
+  verificationInflatedBytes: 256 * 1024 * 1024,
   /** Verification regions returned inline. */
   regions: 1024,
   /** Hex preview per changed range; the exact length is always reported. */
